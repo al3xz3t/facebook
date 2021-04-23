@@ -1,0 +1,100 @@
+    <script>
+        (function(){
+            var body = $('body');
+
+            var socialLoginErrorElm = $('#loginError');
+            var loginModal = $('#loginModal');
+
+            body.on('social-login:error', function(e, error) {
+                socialLoginErrorElm.removeClass('hide').html('<div class="alert alert-danger">' + error + '</div>');
+                loginModal.removeClass("logging-in");
+            });
+            window.loginWithFb = function(){
+                FB.login(function(response) {
+                    if (response.authResponse) {
+                        if(response.authResponse.grantedScopes.split(',').indexOf('email') < 0) {
+                            //If email permission not granted
+                            body.trigger('social-login:error', (__('fbNoEmailError')));
+                            return;
+                        }
+                        FB.api('/me', {fields: 'id,name,email'}, function(response) {
+                            console.log('Logged in as ' + response.name + '.');
+                            //Dual check email - needed to if check if the user has a verified email ID
+                            if(!response.email) {
+                                body.trigger('social-login:error', (__('fbNoEmailError')));
+                                return;
+                            }
+                            body.trigger('loggedIn:fb');
+                        });
+                    } else {
+                        body.trigger('social-login:error', (__('fbPermissionError')));
+                    }
+                }, {
+                    scope: 'email',
+                    auth_type: 'rerequest',
+                    'return_scopes': true
+                });
+            }
+            
+            var body = $('body');
+            body.on('click', '[data-action="loginWithFB"]', function(e){
+                loginWithFb();
+                e.preventDefault();
+            });
+            body.on('loggedIn', function(){
+                loginModal.modal('hide');
+            });
+            body.on('loggedIn:fb', function(){
+                if(!User.isLoggedIn()) {
+                    $.get(BASE_PATH + '/login/fb').success(function(response){
+                        User.setData(response.user);
+                    }).fail(function(jqXHR, textStatus, errorThrown){
+                        body.trigger('social-login:error', jqXHR.responseText);
+                    }).always(function(){
+                        loginModal.removeClass("logging-in");
+                    });
+                }
+            });
+            body.on('prompt-login', function(e, message){
+                loginModal.find('.login-prompt-message').html(message);
+                loginModal.modal('show');
+            });
+        })();
+
+        function showNewPointsAlert(addedPoints) {
+            var alertOptions = {
+                title: "+"+ addedPoints +" " + __('points'),
+                text: __('earnedNewPointsMessage'),
+                imageUrl: "{{LeaderboardHelpers::getPointsIcon()}}",
+                confirmButtonText: __('earnedNewPointsOkayBtnText'),
+                allowEscapeKey: true,
+                allowOutsideClick: true,
+                customClass: 'new-points-alert'
+            }
+            @if(!empty($mainBtnColor))
+            alertOptions.confirmButtonColor = '{{{$mainBtnColor}}}';
+            @endif
+            swal(alertOptions);
+        }
+        $('body').on('user-activity-recorded', function() {
+            $.get('{{route('getMyPoints')}}').success(function(response) {
+                if(response && response.points) {
+                    var oldPoints = parseInt(User.data.points);
+                    var newPoints = parseInt(response.points);
+                    User.data.points = newPoints;
+                    User.setData(User.data);
+                    if(oldPoints != newPoints) {
+                        var animateClass = 'animated bounceIn';
+                        $('#headerUserMenu').removeClass(animateClass).addClass(animateClass);
+                        var addedPoints = parseInt(newPoints) - parseInt(oldPoints);
+                        @if(MyConfig::isTrue('leaderboard.showNewPointsAlert'))
+                        showNewPointsAlert(addedPoints);
+                        @endif
+                    }
+                }
+            }).fail(function() {
+
+            });
+        });
+
+    </script>
