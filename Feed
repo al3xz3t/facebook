@@ -1,0 +1,424 @@
+import { useEffect, useState } from "react";
+import { useAuth, useDatabase, useAnalytics } from "../lib/firebase";
+import {
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithPopup,
+  User,
+} from "firebase/auth";
+import { onValue, ref, push, update, get } from "firebase/database";
+
+import type {
+  CardStyle,
+  Confession,
+  Comment,
+} from "../types/confession";
+
+import ConfessionCard from "./ConfessionCard";
+import SecretPostModal from "./SecretPostModal";
+import ConfessionDetails from "./ConfessionDetails";
+
+function Feed() {
+  const auth = useAuth();
+  const db = useDatabase();
+  useAnalytics();
+
+  const [user, setUser] = useState<User | null>(null);
+  const [confessions, setConfessions] = useState<Confession[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const [showSecretModal, setShowSecretModal] = useState(false);
+  const [secretText, setSecretText] = useState("");
+  const [posting, setPosting] = useState(false);
+  const [selectedStyle, setSelectedStyle] =
+    useState<CardStyle>("classic");
+
+  const [activeConfession, setActiveConfession] =
+    useState<Confession | null>(null);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [commentText, setCommentText] = useState("");
+  const [loadingComments, setLoadingComments] = useState(false);
+
+  // pentru meniul de jos
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [activeFilter, setActiveFilter] =
+    useState<"all" | CardStyle>("all");
+
+  // urmărește user-ul logat
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (u) => setUser(u));
+    return () => unsub();
+  }, [auth]);
+
+  // ia confesiunile din Realtime Database
+  useEffect(() => {
+    const confRef = ref(db, "confessions");
+    const unsub = onValue(confRef, (snap) => {
+      const data = snap.val() || {};
+      const list: Confession[] = Object.entries(data).map(
+        ([id, value]: any) => ({
+          id,
+          text: value.text || "",
+          createdAt: value.createdAt || 0,
+          likes: value.likes || 0,
+          likedBy: value.likedBy || {},
+          commentsCount: value.comments
+            ? Object.keys(value.comments).length
+            : value.commentsCount || 0,
+          style: (value.style as CardStyle) || "classic",
+        })
+      );
+
+      list.sort((a, b) => b.createdAt - a.createdAt);
+      setConfessions(list);
+      setLoading(false);
+    });
+
+    return () => unsub();
+  }, [db]);
+
+  const handleGoogleLogin = async () => {
+    const provider = new GoogleAuthProvider();
+    await signInWithPopup(auth, provider);
+  };
+
+  const handleLogout = () => {
+    auth.signOut();
+  };
+
+  // scroll la începutul feed-ului (buton Acasă)
+  const handleHome = () => {
+    const mainEl = document.getElementById("feed-scroll");
+    if (mainEl) {
+      mainEl.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
+
+  // postează secret anonim
+  const submitSecret = async () => {
+    const trimmed = secretText.trim();
+    if (!trimmed) return;
+
+    const limited = trimmed.slice(0, 1000);
+
+    setPosting(true);
+
+    const confRef = ref(db, "confessions");
+
+    const newItem: Omit<Confession, "id"> = {
+      text: limited,
+      createdAt: Date.now(),
+      likes: 0,
+      likedBy: {},
+      commentsCount: 0,
+      style: selectedStyle,
+    };
+
+    await push(confRef, newItem);
+
+    setPosting(false);
+    setSecretText("");
+    setSelectedStyle("classic");
+    setShowSecretModal(false);
+  };
+
+  // like / unlike per user
+  const handleLike = async (conf: Confession) => {
+    if (!user) {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+      return;
+    }
+
+    const uid = user.uid;
+    const likedBy = conf.likedBy || {};
+    const alreadyLiked = !!likedBy[uid];
+
+    const currentLikes = conf.likes || 0;
+    const confRef = ref(db, `confessions/${conf.id}`);
+
+    if (alreadyLiked) {
+      await update(confRef, {
+        likes: Math.max(0, currentLikes - 1),
+        [`likedBy/${uid}`]: null,
+      });
+    } else {
+      await update(confRef, {
+        likes: currentLikes + 1,
+        [`likedBy/${uid}`]: true,
+      });
+    }
+  };
+
+  // deschide modal cu text complet + comentarii
+  const openDetails = async (conf: Confession) => {
+    setActiveConfession(conf);
+    setComments([]);
+    setCommentText("");
+    setLoadingComments(true);
+
+    const commentsRef = ref(db, `confessions/${conf.id}/comments`);
+    const snap = await get(commentsRef);
+    const data = snap.val() || {};
+
+    const list: Comment[] = Object.entries(data).map(
+      ([id, value]: any) => ({
+        id,
+        text: value.text || "",
+        createdAt: value.createdAt || 0,
+      })
+    );
+
+    list.sort((a, b) => a.createdAt - b.createdAt);
+    setComments(list);
+    setLoadingComments(false);
+
+    // când deschizi comentariile, închidem meniul dacă era deschis
+    setIsMenuOpen(false);
+  };
+
+  const closeDetails = () => {
+    setActiveConfession(null);
+    setComments([]);
+    setCommentText("");
+    setLoadingComments(false);
+  };
+
+  // trimite comentariu anonim
+  const submitComment = async () => {
+    if (!activeConfession) return;
+
+    const trimmed = commentText.trim();
+    if (!trimmed) return;
+
+    const limited = trimmed.slice(0, 300);
+
+    const commentsRef = ref(
+      db,
+      `confessions/${activeConfession.id}/comments`
+    );
+    const newItem: Omit<Comment, "id"> = {
+      text: limited,
+      createdAt: Date.now(),
+    };
+
+    const newRef = await push(commentsRef, newItem);
+
+    setComments((prev) => [
+      ...prev,
+      { id: newRef.key || Math.random().toString(), ...newItem },
+    ]);
+    setCommentText("");
+
+    const confRef = ref(db, `confessions/${activeConfession.id}`);
+    await update(confRef, {
+      commentsCount: (activeConfession.commentsCount || 0) + 1,
+    });
+  };
+
+  // filtrare după categorie
+  const visibleConfessions = confessions.filter((c) => {
+    if (activeFilter === "all") return true;
+    return (c.style || "classic") === activeFilter;
+  });
+
+  const selectFilter = (filter: "all" | CardStyle) => {
+    setActiveFilter(filter);
+    setIsMenuOpen(false);
+    setTimeout(() => handleHome(), 50);
+  };
+
+  return (
+    <div className="bg-black text-white h-screen w-screen overflow-hidden">
+      {/* HEADER SUS */}
+      <header className="fixed top-0 left-0 right-0 z-20 flex items-center justify-between px-4 py-3 bg-gradient-to-b from-black to-black/40 backdrop-blur">
+        <div className="font-bold tracking-tight text-lg">
+          anonimat<span className="text-pink-400">.ro</span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowSecretModal(true)}
+            className="px-3 py-1.5 rounded-full bg-pink-500 text-xs font-medium hover:bg-pink-600 transition shadow-lg"
+          >
+            + Postează
+          </button>
+
+          <button
+            onClick={user ? handleLogout : handleGoogleLogin}
+            className="px-3 py-1.5 rounded-full bg-white/10 text-xs font-medium border border-white/20 hover:bg-white/20 transition"
+          >
+            {user ? "Logout" : "Login"}
+          </button>
+        </div>
+      </header>
+
+      {/* FEED – în mijloc, cu spațiu sus/jos pentru header/footer */}
+      <main
+        id="feed-scroll"
+        className="h-screen w-full overflow-y-scroll snap-y snap-mandatory scroll-smooth pt-16 pb-16"
+      >
+        {loading && (
+          <section className="h-[calc(100vh-4rem)] snap-start flex items-center justify-center">
+            <p className="text-neutral-400 text-sm">
+              Se încarcă secretele...
+            </p>
+          </section>
+        )}
+
+        {!loading && visibleConfessions.length === 0 && (
+          <section className="h-[calc(100vh-4rem)] snap-start flex items-center justify-center px-6">
+            <div className="max-w-sm text-center text-neutral-300">
+              <p className="text-lg font-semibold mb-2">
+                Încă nu a mărturisit nimeni nimic.
+              </p>
+              <p className="text-sm opacity-75">
+                Fii primul care își spune secretul anonim și dă startul
+                feed-ului.
+              </p>
+            </div>
+          </section>
+        )}
+
+        {visibleConfessions.map((c) => (
+          <ConfessionCard
+            key={c.id}
+            confession={c}
+            user={user}
+            onOpenDetails={openDetails}
+            onToggleLike={handleLike}
+          />
+        ))}
+      </main>
+
+      {/* BOTTOM NAV – ca pe TikTok */}
+      <footer className="fixed bottom-0 left-0 right-0 z-20 bg-black/95 border-t border-white/10 h-14 flex items-center justify-around px-6">
+        {/* ACASĂ */}
+        <button
+          onClick={handleHome}
+          className="flex flex-col items-center text-[11px] text-neutral-300"
+        >
+          <span className="text-lg leading-none">🏠</span>
+          <span>Acasă</span>
+        </button>
+
+        {/* PLUS CENTRAL – DESCHIDE MODALUL */}
+        <button
+          onClick={() => setShowSecretModal(true)}
+          className="flex items-center justify-center w-14 h-8 rounded-2xl bg-pink-500 text-sm font-semibold shadow-lg -translate-y-1"
+        >
+          +
+        </button>
+
+        {/* MENIU DREAPTA */}
+        <button
+          onClick={() => setIsMenuOpen((v) => !v)}
+          className="flex flex-col items-center text-[11px] text-neutral-300"
+        >
+          <span className="text-xl leading-none">☰</span>
+          <span>Meniu</span>
+        </button>
+      </footer>
+
+      {/* MENIU LATERAL CATEGORII */}
+      {isMenuOpen && (
+        <div className="fixed inset-y-0 right-0 w-64 bg-neutral-900 border-l border-white/10 z-30 p-4 flex flex-col">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm font-semibold">Categorii</p>
+            <button
+              onClick={() => setIsMenuOpen(false)}
+              className="text-neutral-400 hover:text-white text-sm"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className="flex flex-col gap-2 text-sm">
+            <button
+              onClick={() => selectFilter("all")}
+              className={`text-left px-3 py-2 rounded-lg border ${
+                activeFilter === "all"
+                  ? "bg-pink-500/20 border-pink-400 text-pink-200"
+                  : "bg-black/40 border-white/10 text-neutral-200 hover:bg-black/60"
+              }`}
+            >
+              🔄 Toate secretele
+            </button>
+
+            <button
+              onClick={() => selectFilter("glow")}
+              className={`text-left px-3 py-2 rounded-lg border ${
+                activeFilter === "glow"
+                  ? "bg-pink-500/20 border-pink-400 text-pink-200"
+                  : "bg-black/40 border-white/10 text-neutral-200 hover:bg-black/60"
+              }`}
+            >
+              ❤️ Dragoste
+            </button>
+
+            <button
+              onClick={() => selectFilter("paper")}
+              className={`text-left px-3 py-2 rounded-lg border ${
+                activeFilter === "paper"
+                  ? "bg-pink-500/20 border-pink-400 text-pink-200"
+                  : "bg-black/40 border-white/10 text-neutral-200 hover:bg-black/60"
+              }`}
+            >
+              😂 Amuzant
+            </button>
+
+            <button
+              onClick={() => selectFilter("danger")}
+              className={`text-left px-3 py-2 rounded-lg border ${
+                activeFilter === "danger"
+                  ? "bg-pink-500/20 border-pink-400 text-pink-200"
+                  : "bg-black/40 border-white/10 text-neutral-200 hover:bg-black/60"
+              }`}
+            >
+              😈 Spicy / Dramă
+            </button>
+
+            <button
+              onClick={() => selectFilter("soft")}
+              className={`text-left px-3 py-2 rounded-lg border ${
+                activeFilter === "soft"
+                  ? "bg-pink-500/20 border-pink-400 text-pink-200"
+                  : "bg-black/40 border-white/10 text-neutral-200 hover:bg-black/60"
+              }`}
+            >
+              😢 Sensibil
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL POSTARE */}
+      <SecretPostModal
+        isOpen={showSecretModal}
+        secretText={secretText}
+        selectedStyle={selectedStyle}
+        posting={posting}
+        onChangeText={setSecretText}
+        onChangeStyle={setSelectedStyle}
+        onClose={() => {
+          setShowSecretModal(false);
+          setSelectedStyle("classic");
+        }}
+        onSubmit={submitSecret}
+      />
+
+      {/* MODAL DETALII + COMENTARII */}
+      <ConfessionDetails
+        confession={activeConfession}
+        comments={comments}
+        loadingComments={loadingComments}
+        commentText={commentText}
+        onChangeCommentText={setCommentText}
+        onClose={closeDetails}
+        onSubmitComment={submitComment}
+      />
+    </div>
+  );
+}
+
+export default Feed;
